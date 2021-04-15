@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"io"
+	"strings"
 )
 
 var (
@@ -37,6 +38,7 @@ const (
 	Multi = CommandType(iota)
 	String
 	Number
+	Status
 )
 
 type Command struct {
@@ -212,6 +214,35 @@ func (r *Parser) parseString() ([]byte, error) {
 	return data, nil
 }
 
+func (r *Parser) parseStatus() (string, error) {
+	var err error
+	if r.buffer[r.parsePosition] != '+' {
+		return "", ExpectTypeChar
+	}
+	r.parsePosition++
+	b := &strings.Builder{}
+LOOP:
+	for {
+		err = r.requireNBytes(1)
+		if err != nil {
+			return "", err
+		}
+
+		switch r.buffer[r.parsePosition] {
+		case '\n':
+			r.parsePosition++
+			break LOOP
+		case '\r':
+			// ignore
+		default:
+			b.WriteByte(r.buffer[r.parsePosition])
+		}
+		r.parsePosition++
+	}
+
+	return b.String(), nil
+}
+
 func (r *Parser) parseNumber() (int64, error) {
 	var err error
 	var n int64
@@ -318,6 +349,18 @@ func (r *Parser) ReadCommand() (*Command, error) {
 				last: true,
 			}
 		}
+	} else if r.buffer[r.parsePosition] == '+' {
+		str, err := r.parseStatus()
+		if err == nil {
+			cmd = &Command{
+				t:    Status,
+				argv: [][]byte{[]byte(str)},
+				last: true,
+			}
+		}
+	} else if r.buffer[r.parsePosition] == '\n' {
+		// empty msg
+		r.parsePosition++
 	} else {
 		cmd, err = r.parseTelnet()
 	}

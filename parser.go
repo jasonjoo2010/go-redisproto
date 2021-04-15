@@ -31,8 +31,18 @@ func (p *ProtocolError) Error() string {
 	return p.message
 }
 
+type CommandType int
+
+const (
+	Multi = CommandType(iota)
+	String
+	Number
+)
+
 type Command struct {
+	t    CommandType
 	argv [][]byte
+	n    int64
 	last bool
 }
 
@@ -44,8 +54,16 @@ func (c *Command) Get(index int) []byte {
 	}
 }
 
+func (c *Command) Number() int64 {
+	return c.n
+}
+
 func (c *Command) ArgCount() int {
 	return len(c.argv)
+}
+
+func (c *Command) Type() CommandType {
+	return c.t
 }
 
 // IsLast is true if this command is the last one in receive buffer, command handler should call writer.Flush()
@@ -101,7 +119,7 @@ func (r *Parser) requireNBytes(num int) error {
 	}
 	return nil
 }
-func (r *Parser) readNumber() (int, error) {
+func (r *Parser) readNumber() (int64, error) {
 	var neg = false
 	err := r.requireNBytes(1)
 	if err != nil {
@@ -140,9 +158,9 @@ OUTTER:
 		return 0, ExpectNumber
 	}
 	if neg {
-		return -int(num), nil
+		return -int64(num), nil
 	} else {
-		return int(num), nil
+		return int64(num), nil
 	}
 
 }
@@ -157,12 +175,68 @@ func (r *Parser) discardNewLine() error {
 	return ExpectNewLine
 }
 
+func (r *Parser) parseString() ([]byte, error) {
+	var err error
+	var data []byte
+	if r.buffer[r.parsePosition] != '$' {
+		return nil, ExpectTypeChar
+	}
+	r.parsePosition++
+	var plen int
+	var n int64
+	if n, err = r.readNumber(); err != nil {
+		return nil, err
+	}
+	plen = int(n)
+	if err = r.discardNewLine(); err != nil {
+		return nil, err
+	}
+	switch {
+	case plen == -1:
+		// null bulk
+	case plen == 0:
+		data = emptyBulk[:] // empty bulk
+	case plen > 0 && plen <= MaxBulkSize:
+		if err = r.requireNBytes(plen); err != nil {
+			return nil, err
+		}
+		data = r.buffer[r.parsePosition:(r.parsePosition + plen)]
+		r.parsePosition += plen
+	default:
+		return nil, InvalidBulkSize
+	}
+	if err = r.discardNewLine(); err != nil {
+		return nil, err
+	}
+
+	return data, nil
+}
+
+func (r *Parser) parseNumber() (int64, error) {
+	var err error
+	var n int64
+	if r.buffer[r.parsePosition] != ':' {
+		return 0, ExpectTypeChar
+	}
+	r.parsePosition++
+	if n, err = r.readNumber(); err != nil {
+		return 0, err
+	}
+	if err = r.discardNewLine(); err != nil {
+		return 0, err
+	}
+
+	return n, nil
+}
+
 func (r *Parser) parseBinary() (*Command, error) {
 	r.parsePosition++
-	numArg, err := r.readNumber()
+	n, err := r.readNumber()
 	if err != nil {
 		return nil, err
 	}
+	numArg := int(n)
+
 	var e error
 	if e = r.discardNewLine(); e != nil {
 		return nil, e
@@ -180,34 +254,11 @@ func (r *Parser) parseBinary() (*Command, error) {
 		if e = r.requireNBytes(1); e != nil {
 			return nil, e
 		}
-		if r.buffer[r.parsePosition] != '$' {
-			return nil, ExpectTypeChar
-		}
-		r.parsePosition++
-		var plen int
-		if plen, e = r.readNumber(); e != nil {
+		data, e := r.parseString()
+		if e != nil {
 			return nil, e
 		}
-		if e = r.discardNewLine(); e != nil {
-			return nil, e
-		}
-		switch {
-		case plen == -1:
-			argv = append(argv, nil) // null bulk
-		case plen == 0:
-			argv = append(argv, emptyBulk[:]) // empty bulk
-		case plen > 0 && plen <= MaxBulkSize:
-			if e = r.requireNBytes(plen); e != nil {
-				return nil, e
-			}
-			argv = append(argv, r.buffer[r.parsePosition:(r.parsePosition+plen)])
-			r.parsePosition += plen
-		default:
-			return nil, InvalidBulkSize
-		}
-		if e = r.discardNewLine(); e != nil {
-			return nil, e
-		}
+		argv = append(argv, data)
 	}
 	return &Command{argv: argv}, nil
 }
@@ -249,6 +300,24 @@ func (r *Parser) ReadCommand() (*Command, error) {
 	var err error
 	if r.buffer[r.parsePosition] == '*' {
 		cmd, err = r.parseBinary()
+	} else if r.buffer[r.parsePosition] == '$' {
+		str, err := r.parseString()
+		if err == nil {
+			cmd = &Command{
+				t:    String,
+				argv: [][]byte{[]byte(str)},
+				last: true,
+			}
+		}
+	} else if r.buffer[r.parsePosition] == ':' {
+		num, err := r.parseNumber()
+		if err == nil {
+			cmd = &Command{
+				t:    Number,
+				n:    num,
+				last: true,
+			}
+		}
 	} else {
 		cmd, err = r.parseTelnet()
 	}

@@ -42,10 +42,11 @@ const (
 )
 
 type Command struct {
-	t    CommandType
-	argv [][]byte
-	n    int64
-	last bool
+	t     CommandType
+	argv  [][]byte
+	n     int64
+	last  bool
+	bytes int
 }
 
 func (c *Command) Get(index int) []byte {
@@ -66,6 +67,10 @@ func (c *Command) ArgCount() int {
 
 func (c *Command) Type() CommandType {
 	return c.t
+}
+
+func (c *Command) Len() int {
+	return c.bytes
 }
 
 // IsLast is true if this command is the last one in receive buffer, command handler should call writer.Flush()
@@ -329,6 +334,7 @@ func (r *Parser) ReadCommand() (*Command, error) {
 
 	var cmd *Command
 	var err error
+	begin := r.parsePosition
 	if r.buffer[r.parsePosition] == '*' {
 		cmd, err = r.parseBinary()
 	} else if r.buffer[r.parsePosition] == '$' {
@@ -363,6 +369,9 @@ func (r *Parser) ReadCommand() (*Command, error) {
 		r.parsePosition++
 	} else {
 		cmd, err = r.parseTelnet()
+	}
+	if cmd != nil {
+		cmd.bytes = r.parsePosition - begin
 	}
 	if r.parsePosition >= r.writeIndex {
 		if cmd != nil {
